@@ -16,6 +16,8 @@ let port = null, reader = null, reading = false;
 let textBuffer = "", prevDeviceTime = null, elapsedTime = 0;
 let filterState = { iir: null, window: [] };
 let renderPending = false;
+let zoomMode = false, frequencyZoom = null, zoomDrag = null;
+let timeZoomMode = false, timeZoom = null, timeZoomDrag = null;
 
 // Trạng thái phiên ghi 30s
 const RECORD_MS = 30000;
@@ -118,13 +120,21 @@ function computeSpectrum(data, sourceKey) {
   if (duration <= 0 || !Number.isFinite(duration)) return null;
   const fs = (count - 1) / duration;
 
-  // 1. Khử thành phần DC Offset (Zero-mean) & áp dụng cửa sổ Hann
+  // Bỏ DC và xu hướng tuyến tính để độ trôi ánh sáng chậm không lấn át phổ dao động.
   const mean = data.reduce((s, d) => s + d[sourceKey], 0) / count;
+  const center = (count - 1) / 2;
+  let slopeNumerator = 0, slopeDenominator = 0;
+  for (let i = 0; i < count; i++) {
+    const centeredIndex = i - center;
+    slopeNumerator += centeredIndex * (data[i][sourceKey] - mean);
+    slopeDenominator += centeredIndex * centeredIndex;
+  }
+  const slope = slopeDenominator > 0 ? slopeNumerator / slopeDenominator : 0;
   const real = new Float32Array(count), imag = new Float32Array(count);
   let hannSum = 0;
   for (let i = 0; i < count; i++) {
     const h = 0.5 * (1 - Math.cos(2 * Math.PI * i / (count - 1)));
-    real[i] = (data[i][sourceKey] - mean) * h;
+    real[i] = (data[i][sourceKey] - mean - slope * (i - center)) * h;
     hannSum += h;
   }
 
@@ -185,36 +195,42 @@ function prepareCanvas(canvas) {
   canvas.height = Math.round(h * ratio);
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.fillStyle = "#08131f";
+  ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
   return { ctx, w, h };
 }
 
-function drawAxes(canvas, { xMax, xStep, yMin, yMax, yStep, xLabel, yLabel, left = 66, right = 20, top = 18, bottom = 40 }) {
+function formatAxisTick(value, step) {
+  let precision = 0;
+  while (precision < 4 && Math.abs(step * (10 ** precision) - Math.round(step * (10 ** precision))) > 1e-8) precision++;
+  return Number(value.toFixed(precision)).toString();
+}
+
+function drawAxes(canvas, { xMin = 0, xMax, xStep, yMin, yMax, yStep, xLabel, yLabel, left = 66, right = 20, top = 18, bottom = 40 }) {
   const { ctx, w, h } = prepareCanvas(canvas);
   const pw = Math.max(1, w - left - right), ph = Math.max(1, h - top - bottom);
-  const getX = x => left + (x / xMax) * pw;
+  const getX = x => left + ((x - xMin) / (xMax - xMin)) * pw;
   const getY = y => top + (1 - (y - yMin) / (yMax - yMin)) * ph;
 
-  ctx.font = "10px 'DM Mono', Consolas, monospace";
+  ctx.font = "11px Arial, sans-serif";
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(133, 164, 188, .12)";
-  ctx.fillStyle = "#6e8498";
-  for (let y = yMin, index = 0; y <= yMax + yStep * 0.15; y += yStep, index++) {
+  ctx.strokeStyle = "#e2e5e9";
+  ctx.fillStyle = "#333333";
+  for (let y = yMin; y <= yMax + yStep * 0.15; y += yStep) {
     const yp = getY(y);
     ctx.beginPath(); ctx.moveTo(left, yp); ctx.lineTo(left + pw, yp); ctx.stroke();
     ctx.textAlign = "right";
-    ctx.fillText(Number.isInteger(y) ? String(y) : y.toFixed(1), left - 9, yp + 3);
+    ctx.fillText(formatAxisTick(y, yStep), left - 9, yp + 3);
   }
-  for (let x = 0; x <= xMax + xStep * 0.15; x += xStep) {
+  for (let x = Math.ceil(xMin / xStep) * xStep; x <= xMax + xStep * 0.15; x += xStep) {
     const xp = getX(x);
     ctx.beginPath(); ctx.moveTo(xp, top); ctx.lineTo(xp, top + ph); ctx.stroke();
     ctx.textAlign = "center";
-    ctx.fillText(Number.isInteger(x) ? String(x) : x.toFixed(1), xp, top + ph + 17);
+    ctx.fillText(formatAxisTick(x, xStep), xp, top + ph + 17);
   }
-  ctx.strokeStyle = "rgba(164, 190, 215, .28)";
+  ctx.strokeStyle = "#424242";
   ctx.strokeRect(left, top, pw, ph);
-  ctx.fillStyle = "#8094a7";
+  ctx.fillStyle = "#252525";
   ctx.textAlign = "center";
   ctx.fillText(xLabel, left + pw / 2, h - 8);
   ctx.save(); ctx.translate(16, top + ph / 2); ctx.rotate(-Math.PI / 2);
@@ -227,7 +243,7 @@ function drawEmptyChart(canvas, message) {
   const { ctx, w, h } = prepareCanvas(canvas);
   ctx.fillStyle = "#6e8498";
   ctx.textAlign = "center";
-  ctx.font = "12px 'Manrope', sans-serif";
+  ctx.font = "12px Arial, sans-serif";
   ctx.fillText(message, w / 2, h / 2);
 }
 
@@ -237,8 +253,11 @@ function drawTimeChart() {
   if (data.length < 2) return drawEmptyChart($("timeChart"), "Kết nối ESP32 để xem tín hiệu theo thời gian");
 
   const winSec = parseInt($("timeWindowSelect").value) || 30;
-  const tEnd = data[data.length - 1].time, tStart = tEnd - winSec * 1000;
-  const pts = data.filter(d => d.time >= tStart);
+  const fullStart = data[data.length - 1].time - winSec * 1000;
+  const range = timeZoom || { min: 0, max: winSec };
+  const viewStart = fullStart + range.min * 1000;
+  const viewEnd = fullStart + range.max * 1000;
+  const pts = data.filter(d => d.time >= viewStart && d.time <= viewEnd);
   if (pts.length < 2) return drawEmptyChart($("timeChart"), "Đang chờ thêm mẫu...");
 
   let yMin = Infinity, yMax = -Infinity;
@@ -250,24 +269,81 @@ function drawTimeChart() {
   const yStep = Math.max(1, Math.ceil((yMax - yMin) / 5 / 10) * 10);
 
   const p = drawAxes($("timeChart"), {
-    xMax: winSec, xStep: winSec <= 10 ? 2 : 5, yMin, yMax, yStep,
+    xMin: range.min, xMax: range.max, xStep: niceAxisStep((range.max - range.min) / 8), yMin, yMax, yStep,
     xLabel: "Thời gian (s)", yLabel: "Giá trị ADC"
   });
   p.ctx.save(); p.clipBox();
-  const toX = t => (t - tStart) / 1000;
+  const toX = t => (t - fullStart) / 1000;
 
-  p.ctx.beginPath(); p.ctx.strokeStyle = "#ffb45d"; p.ctx.lineWidth = 1.05; p.ctx.globalAlpha = .72;
+  p.ctx.beginPath(); p.ctx.strokeStyle = "#a4a9b0"; p.ctx.lineWidth = 1.0; p.ctx.globalAlpha = .75;
   pts.forEach((d, i) => i === 0 ? p.ctx.moveTo(p.getX(toX(d.time)), p.getY(d.raw)) : p.ctx.lineTo(p.getX(toX(d.time)), p.getY(d.raw)));
   p.ctx.stroke();
 
-  p.ctx.beginPath(); p.ctx.strokeStyle = "#40e0c0"; p.ctx.lineWidth = 1.8;
-  p.ctx.shadowColor = "rgba(64, 224, 192, .48)"; p.ctx.shadowBlur = 7;
+  p.ctx.beginPath(); p.ctx.strokeStyle = "#1749d2"; p.ctx.lineWidth = 2.1;
   pts.forEach((d, i) => i === 0 ? p.ctx.moveTo(p.getX(toX(d.time)), p.getY(d.filtered)) : p.ctx.lineTo(p.getX(toX(d.time)), p.getY(d.filtered)));
-  p.ctx.stroke(); p.ctx.shadowBlur = 0;
+  p.ctx.stroke();
+  drawZoomSelection(p.ctx, p, timeZoomDrag);
   p.ctx.restore();
 }
 
-// So sánh phổ FFT của cùng một đoạn tín hiệu trước và sau lọc.
+function niceAxisStep(roughStep) {
+  roughStep = Math.max(roughStep, 0.001);
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const fraction = roughStep / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  return niceFraction * magnitude;
+}
+
+function drawSpectrumSeries(ctx, spectrum, minF, maxF, getX, getY, color, width) {
+  const points = spectrum.filter(point => point.freq >= minF && point.freq <= maxF);
+  if (points.length < 2) return;
+  ctx.beginPath();
+  points.forEach((point, index) => index === 0 ? ctx.moveTo(getX(point.freq), getY(point.amp)) : ctx.lineTo(getX(point.freq), getY(point.amp)));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke();
+}
+
+function getBaseFrequencyRange() {
+  return parseFloat($("freqSpanSelect").value) || 100;
+}
+
+function getVisibleFrequencyRange() {
+  return frequencyZoom || { min: 0, max: getBaseFrequencyRange() };
+}
+
+function chartValueAtPointer(event, canvasId, range) {
+  const canvas = $(canvasId);
+  const rect = canvas.getBoundingClientRect();
+  const left = 66, right = 20;
+  const plotWidth = Math.max(1, rect.width - left - right);
+  const plotX = Math.min(plotWidth, Math.max(0, event.clientX - rect.left - left));
+  return range.min + (plotX / plotWidth) * (range.max - range.min);
+}
+
+function frequencyAtPointer(event, range) {
+  return chartValueAtPointer(event, "frequencyChart", range);
+}
+
+function timeAtPointer(event, range) {
+  return chartValueAtPointer(event, "timeChart", range);
+}
+
+function drawZoomSelection(ctx, p, drag = zoomDrag) {
+  if (!drag) return;
+  const low = Math.min(drag.start, drag.current);
+  const high = Math.max(drag.start, drag.current);
+  const x1 = p.getX(low), x2 = p.getX(high);
+  ctx.fillStyle = "rgba(18,69,207,.10)";
+  ctx.fillRect(x1, p.top, Math.max(1, x2 - x1), p.ph);
+  ctx.strokeStyle = "rgba(18,69,207,.8)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x1, p.top, Math.max(1, x2 - x1), p.ph);
+}
+
+// Phổ thô và sau lọc dùng chung một trục biên độ để so sánh trực tiếp.
 function drawFrequencyChart() {
   const data = (isFrozen && recSamples.length >= 16) ? recSamples : samples;
   const requestedCount = Math.min(data.length, isFrozen ? MAX_FFT_SAMPLES : MAX_SAMPLES);
@@ -281,7 +357,9 @@ function drawFrequencyChart() {
   const windowData = data.slice(-count);
   const rawRes = computeSpectrum(windowData, "raw");
   const filteredRes = computeSpectrum(windowData, "filtered");
-  if (!rawRes || !filteredRes) return drawEmptyChart($("frequencyChart"), "Không thể tính phổ từ đoạn tín hiệu này");
+  if (!rawRes || !filteredRes) {
+    return drawEmptyChart($("frequencyChart"), "Không thể tính phổ từ đoạn tín hiệu này");
+  }
   lastFftResult = filteredRes;
   lastRawSpectrum = rawRes;
 
@@ -291,7 +369,8 @@ function drawFrequencyChart() {
   const segmentLabel = isFrozen
     ? `${count.toLocaleString("vi-VN")} mẫu FFT cuối / ${data.length.toLocaleString("vi-VN")} mẫu phiên`
     : `${count.toLocaleString("vi-VN")} mẫu FFT`;
-  $("spectrumMeta").textContent = `${segmentLabel} · Fs = ${filteredRes.fs.toFixed(1)} Hz · Cửa sổ Hann`;
+  const range = getVisibleFrequencyRange();
+  $("spectrumMeta").textContent = `${segmentLabel} · Fs = ${filteredRes.fs.toFixed(1)} Hz · dải ${range.min.toFixed(1)}–${range.max.toFixed(1)} Hz`;
 
   if (filteredRes.dominantPeak) {
     const peak = filteredRes.dominantPeak;
@@ -307,67 +386,200 @@ function drawFrequencyChart() {
     renderSpectrumTable(filteredRes, false);
   }
 
-  const maxF = parseFloat($("freqSpanSelect").value) || 100;
-  let maxA = 0;
-  rawRes.spectrum.forEach(s => { if (s.freq <= maxF) maxA = Math.max(maxA, s.amp); });
-  filteredRes.spectrum.forEach(s => { if (s.freq <= maxF) maxA = Math.max(maxA, s.amp); });
-  maxA = Math.max(1, Math.ceil(maxA * 1.18 / 5) * 5);
-  const yStep = Math.max(1, Math.ceil(maxA / 5 / 5) * 5);
+  const visibleRaw = rawRes.spectrum.filter(point => point.freq >= range.min && point.freq <= range.max);
+  const visibleFiltered = filteredRes.spectrum.filter(point => point.freq >= range.min && point.freq <= range.max);
+  let maxAmplitude = 0;
+  visibleRaw.forEach(point => { maxAmplitude = Math.max(maxAmplitude, point.amp); });
+  visibleFiltered.forEach(point => { maxAmplitude = Math.max(maxAmplitude, point.amp); });
+  const amplitudeRange = Math.max(maxAmplitude * 1.12, 0.5);
+  const yStep = niceAxisStep(amplitudeRange / 8);
+  const yMax = Math.ceil(amplitudeRange / yStep) * yStep;
+  const xStep = niceAxisStep((range.max - range.min) / 8);
   const p = drawAxes($("frequencyChart"), {
-    xMax: maxF, xStep: maxF <= 20 ? 2 : maxF <= 50 ? 5 : 10,
-    yMin: 0, yMax: maxA, yStep, xLabel: "Tần số (Hz)", yLabel: "Biên độ ADC"
+    xMin: range.min, xMax: range.max, xStep,
+    yMin: 0, yMax, yStep,
+    xLabel: "Tần số (Hz)", yLabel: "Biên độ ADC"
   });
 
   p.ctx.save(); p.clipBox();
-  const drawSpectrum = (result, color, glow, fill) => {
-    const points = result.spectrum.filter(point => point.freq <= maxF);
-    if (points.length < 2) return;
-    p.ctx.beginPath();
-    p.ctx.moveTo(p.getX(points[0].freq), p.getY(0));
-    points.forEach(point => p.ctx.lineTo(p.getX(point.freq), p.getY(point.amp)));
-    p.ctx.lineTo(p.getX(points[points.length - 1].freq), p.getY(0));
-    p.ctx.closePath();
-    if (fill) {
-      const gradient = p.ctx.createLinearGradient(0, p.top, 0, p.top + p.ph);
-      gradient.addColorStop(0, "rgba(64,224,192,.22)");
-      gradient.addColorStop(1, "rgba(64,224,192,0)");
-      p.ctx.fillStyle = gradient;
-      p.ctx.fill();
-    }
-    p.ctx.beginPath();
-    points.forEach((point, index) => index === 0 ? p.ctx.moveTo(p.getX(point.freq), p.getY(point.amp)) : p.ctx.lineTo(p.getX(point.freq), p.getY(point.amp)));
-    p.ctx.strokeStyle = color;
-    p.ctx.lineWidth = fill ? 1.8 : 1.15;
-    p.ctx.globalAlpha = fill ? 1 : .78;
-    p.ctx.shadowColor = glow;
-    p.ctx.shadowBlur = fill ? 9 : 2;
-    p.ctx.stroke();
-    p.ctx.shadowBlur = 0;
-    p.ctx.globalAlpha = 1;
-  };
-
-  // Mốc lưới điện giúp đối chiếu hiện tượng nhấp nháy ở đèn chiếu sáng.
-  if (maxF >= 50) {
+  if (range.min <= 50 && range.max >= 50) {
     const x50 = p.getX(50);
-    p.ctx.beginPath(); p.ctx.setLineDash([4, 5]); p.ctx.strokeStyle = "rgba(187,143,255,.75)"; p.ctx.lineWidth = 1;
+    p.ctx.beginPath(); p.ctx.setLineDash([5, 4]); p.ctx.strokeStyle = "#9266b4"; p.ctx.lineWidth = 1;
     p.ctx.moveTo(x50, p.top); p.ctx.lineTo(x50, p.top + p.ph); p.ctx.stroke(); p.ctx.setLineDash([]);
-    p.ctx.fillStyle = "#c7a8ff"; p.ctx.font = "10px 'DM Mono', Consolas, monospace"; p.ctx.textAlign = "center";
-    p.ctx.fillText("50 Hz", x50, p.top + 12);
+    p.ctx.fillStyle = "#70458f"; p.ctx.font = "11px Arial, sans-serif"; p.ctx.textAlign = "center";
+    p.ctx.fillText("50 Hz", x50, p.top + 14);
   }
+  drawSpectrumSeries(p.ctx, rawRes.spectrum, range.min, range.max, p.getX, p.getY, "#bd3737", 1.5);
+  drawSpectrumSeries(p.ctx, filteredRes.spectrum, range.min, range.max, p.getX, p.getY, "#1245cf", 1.9);
 
-  drawSpectrum(rawRes, "#ffb45d", "rgba(255,180,93,.25)", false);
-  drawSpectrum(filteredRes, "#40e0c0", "rgba(64,224,192,.55)", true);
-
-  const peak = filteredRes.dominantPeak;
-  if (peak && peak.freq <= maxF) {
-    const px = p.getX(peak.freq), py = p.getY(peak.amp);
+  const localPeak = filteredRes.peaks.find(peak => peak.freq >= range.min && peak.freq <= range.max);
+  if (localPeak) {
+    const px = p.getX(localPeak.freq), py = p.getY(localPeak.amp);
     p.ctx.beginPath(); p.ctx.arc(px, py, 4, 0, Math.PI * 2);
-    p.ctx.fillStyle = "#d6fff4"; p.ctx.shadowColor = "#40e0c0"; p.ctx.shadowBlur = 12; p.ctx.fill(); p.ctx.shadowBlur = 0;
-    p.ctx.fillStyle = "#b9f6e8"; p.ctx.font = "10px 'DM Mono', Consolas, monospace";
+    p.ctx.fillStyle = "#1245cf"; p.ctx.fill();
+    p.ctx.strokeStyle = "#fff"; p.ctx.lineWidth = 1.5; p.ctx.stroke();
+    p.ctx.fillStyle = "#202124"; p.ctx.font = "11px Arial, sans-serif";
     p.ctx.textAlign = px > p.left + p.pw * .72 ? "right" : "left";
-    p.ctx.fillText(`${peak.freq.toFixed(2)} Hz`, px + (p.ctx.textAlign === "right" ? -8 : 8), Math.max(p.top + 16, py - 10));
+    p.ctx.fillText(`${localPeak.freq.toFixed(2)} Hz`, px + (p.ctx.textAlign === "right" ? -8 : 8), Math.max(p.top + 17, py - 10));
   }
+  drawZoomSelection(p.ctx, p, zoomDrag);
   p.ctx.restore();
+}
+
+function getTimeWindowSeconds() {
+  return parseInt($("timeWindowSelect").value, 10) || 30;
+}
+
+function getVisibleTimeRange() {
+  const windowSeconds = getTimeWindowSeconds();
+  return timeZoom || { min: 0, max: windowSeconds };
+}
+
+function updateTimeZoomControls() {
+  const button = $("btnTimeZoomMode");
+  button.classList.toggle("active", timeZoomMode);
+  button.setAttribute("aria-pressed", String(timeZoomMode));
+  button.textContent = timeZoomMode ? "Zoom đang bật" : "Zoom chọn vùng";
+  $("timeChart").classList.toggle("zoom-active", timeZoomMode);
+  $("btnTimeResetZoom").disabled = !timeZoom;
+  $("timeZoomHint").textContent = timeZoomMode
+    ? "Zoom đang bật: kéo chọn khoảng thời gian hoặc lăn chuột để phóng/thu quanh con trỏ. Nhấp đúp để đặt lại."
+    : "Bật “Zoom chọn vùng”, kéo trên biểu đồ để phóng to một khoảng thời gian. Trục ADC tự căn theo đoạn đang xem.";
+}
+
+function resetTimeZoom() {
+  timeZoom = null;
+  timeZoomDrag = null;
+  updateTimeZoomControls();
+  scheduleRender();
+}
+
+function minimumTimeZoomSpan() {
+  const data = (isFrozen && recSamples.length > 1) ? recSamples : samples;
+  const interval = data.length > 1 ? (data[data.length - 1].time - data[data.length - 2].time) / 1000 : getTimeWindowSeconds() / 1000;
+  return Math.max(interval * 4, getTimeWindowSeconds() / 2000);
+}
+
+function handleTimePointerDown(event) {
+  if (!timeZoomMode || event.button !== 0) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  if (x < 66 || x > rect.width - 20 || y < 18 || y > rect.height - 40) return;
+  const range = getVisibleTimeRange();
+  const time = timeAtPointer(event, range);
+  timeZoomDrag = { start: time, current: time, range, pointerId: event.pointerId };
+  event.currentTarget.setPointerCapture(event.pointerId);
+  scheduleRender();
+}
+
+function handleTimePointerMove(event) {
+  if (!timeZoomDrag || timeZoomDrag.pointerId !== event.pointerId) return;
+  timeZoomDrag.current = timeAtPointer(event, timeZoomDrag.range);
+  scheduleRender();
+}
+
+function handleTimePointerUp(event) {
+  if (!timeZoomDrag || timeZoomDrag.pointerId !== event.pointerId) return;
+  timeZoomDrag.current = timeAtPointer(event, timeZoomDrag.range);
+  const drag = timeZoomDrag;
+  const min = Math.min(drag.start, drag.current);
+  const max = Math.max(drag.start, drag.current);
+  timeZoomDrag = null;
+  if (max - min >= minimumTimeZoomSpan()) timeZoom = { min, max };
+  updateTimeZoomControls();
+  scheduleRender();
+}
+
+function handleTimeWheel(event) {
+  if (!timeZoomMode) return;
+  event.preventDefault();
+  const baseMax = getTimeWindowSeconds();
+  const range = getVisibleTimeRange();
+  const anchor = timeAtPointer(event, range);
+  const oldSpan = range.max - range.min;
+  const minSpan = minimumTimeZoomSpan();
+  const newSpan = Math.min(baseMax, Math.max(minSpan, oldSpan * (event.deltaY < 0 ? 0.8 : 1.25)));
+  const anchorRatio = oldSpan > 0 ? (anchor - range.min) / oldSpan : 0.5;
+  let min = anchor - anchorRatio * newSpan;
+  let max = min + newSpan;
+  if (min < 0) { max -= min; min = 0; }
+  if (max > baseMax) { min -= max - baseMax; max = baseMax; }
+  timeZoom = max - min >= baseMax * 0.995 ? null : { min, max };
+  updateTimeZoomControls();
+  scheduleRender();
+}
+
+function updateZoomControls() {
+  const button = $("btnZoomMode");
+  button.classList.toggle("active", zoomMode);
+  button.setAttribute("aria-pressed", String(zoomMode));
+  button.textContent = zoomMode ? "Zoom đang bật" : "Zoom chọn vùng";
+  $("frequencyChart").classList.toggle("zoom-active", zoomMode);
+  $("btnResetZoom").disabled = !frequencyZoom;
+  $("zoomHint").textContent = zoomMode
+    ? "Zoom đang bật: kéo chọn dải tần hoặc lăn chuột để phóng/thu quanh con trỏ. Hai tín hiệu dùng chung trục ADC; nhấp đúp để đặt lại."
+    : "Bật “Zoom chọn vùng”, kéo trên biểu đồ để phóng to dải tần. Biên độ tự căn theo vùng đang xem; hai tín hiệu dùng chung trục ADC.";
+}
+
+function resetSpectrumZoom() {
+  frequencyZoom = null;
+  zoomDrag = null;
+  updateZoomControls();
+  scheduleRender();
+}
+
+function minimumZoomSpan() {
+  const resolution = lastFftResult ? lastFftResult.fs / lastFftResult.count : getBaseFrequencyRange() / 1000;
+  return Math.max(resolution * 4, getBaseFrequencyRange() / 2000);
+}
+
+function handleSpectrumPointerDown(event) {
+  if (!zoomMode || event.button !== 0) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  if (x < 66 || x > rect.width - 20 || y < 18 || y > rect.height - 40) return;
+  const range = getVisibleFrequencyRange();
+  const frequency = frequencyAtPointer(event, range);
+  zoomDrag = { start: frequency, current: frequency, range, pointerId: event.pointerId };
+  event.currentTarget.setPointerCapture(event.pointerId);
+  scheduleRender();
+}
+
+function handleSpectrumPointerMove(event) {
+  if (!zoomDrag || zoomDrag.pointerId !== event.pointerId) return;
+  zoomDrag.current = frequencyAtPointer(event, zoomDrag.range);
+  scheduleRender();
+}
+
+function handleSpectrumPointerUp(event) {
+  if (!zoomDrag || zoomDrag.pointerId !== event.pointerId) return;
+  zoomDrag.current = frequencyAtPointer(event, zoomDrag.range);
+  const drag = zoomDrag;
+  const min = Math.min(drag.start, drag.current);
+  const max = Math.max(drag.start, drag.current);
+  zoomDrag = null;
+  if (max - min >= minimumZoomSpan()) frequencyZoom = { min, max };
+  updateZoomControls();
+  scheduleRender();
+}
+
+function handleSpectrumWheel(event) {
+  if (!zoomMode) return;
+  event.preventDefault();
+  const baseMax = getBaseFrequencyRange();
+  const range = getVisibleFrequencyRange();
+  const anchor = frequencyAtPointer(event, range);
+  const oldSpan = range.max - range.min;
+  const minSpan = minimumZoomSpan();
+  const newSpan = Math.min(baseMax, Math.max(minSpan, oldSpan * (event.deltaY < 0 ? 0.8 : 1.25)));
+  const anchorRatio = oldSpan > 0 ? (anchor - range.min) / oldSpan : 0.5;
+  let min = anchor - anchorRatio * newSpan;
+  let max = min + newSpan;
+  if (min < 0) { max -= min; min = 0; }
+  if (max > baseMax) { min -= max - baseMax; max = baseMax; }
+  frequencyZoom = max - min >= baseMax * 0.995 ? null : { min, max };
+  updateZoomControls();
+  scheduleRender();
 }
 
 function scheduleRender() {
@@ -479,6 +691,10 @@ function exportPng(canvasId, defaultName) {
   a.click();
 }
 
+function exportSpectrumPng() {
+  exportPng("frequencyChart", `Pho_tan_so_Raw_Filtered_${Date.now()}.png`);
+}
+
 // =====================================================================
 // KHỐI 5: GIAO TIẾP WEB SERIAL & SỰ KIỆN
 // =====================================================================
@@ -547,6 +763,14 @@ async function connectSerial() {
     isFrozen = false;
     lastFftResult = null;
     lastRawSpectrum = null;
+    frequencyZoom = null;
+    zoomDrag = null;
+    zoomMode = false;
+    updateZoomControls();
+    timeZoom = null;
+    timeZoomDrag = null;
+    timeZoomMode = false;
+    updateTimeZoomControls();
     $("btnExportCsv").disabled = true;
     $("btnRecord30s").textContent = "Bắt đầu ghi";
     $("btnRecord30s").className = "btn-record";
@@ -604,14 +828,53 @@ $("btnRecord30s").addEventListener("click", () => isRecording ? finish30sRecordi
 $("btnResetRecord").addEventListener("click", resetRecording);
 $("btnExportCsv").addEventListener("click", exportCsv);
 $("btnExportTimePng")?.addEventListener("click", () => exportPng("timeChart", "Tin_hieu_thoi_gian_ADC_LDR.png"));
-$("btnExportPlotPng")?.addEventListener("click", () => exportPng("frequencyChart", "Pho_tan_so_so_sanh_Raw_Filtered.png"));
+$("btnExportPlotPng")?.addEventListener("click", exportSpectrumPng);
+$("btnZoomMode").addEventListener("click", () => {
+  zoomMode = !zoomMode;
+  zoomDrag = null;
+  updateZoomControls();
+});
+$("btnResetZoom").addEventListener("click", resetSpectrumZoom);
+$("btnTimeZoomMode").addEventListener("click", () => {
+  timeZoomMode = !timeZoomMode;
+  timeZoomDrag = null;
+  updateTimeZoomControls();
+});
+$("btnTimeResetZoom").addEventListener("click", resetTimeZoom);
+
+const frequencyCanvas = $("frequencyChart");
+frequencyCanvas.addEventListener("pointerdown", handleSpectrumPointerDown);
+frequencyCanvas.addEventListener("pointermove", handleSpectrumPointerMove);
+frequencyCanvas.addEventListener("pointerup", handleSpectrumPointerUp);
+frequencyCanvas.addEventListener("pointercancel", () => { zoomDrag = null; scheduleRender(); });
+frequencyCanvas.addEventListener("wheel", handleSpectrumWheel, { passive: false });
+frequencyCanvas.addEventListener("dblclick", resetSpectrumZoom);
+const timeCanvas = $("timeChart");
+timeCanvas.addEventListener("pointerdown", handleTimePointerDown);
+timeCanvas.addEventListener("pointermove", handleTimePointerMove);
+timeCanvas.addEventListener("pointerup", handleTimePointerUp);
+timeCanvas.addEventListener("pointercancel", () => { timeZoomDrag = null; scheduleRender(); });
+timeCanvas.addEventListener("wheel", handleTimeWheel, { passive: false });
+timeCanvas.addEventListener("dblclick", resetTimeZoom);
 
 $("filterAlpha").addEventListener("input", e => { $("alphaVal").textContent = parseFloat(e.target.value).toFixed(2); refreshFilterSettings(); });
 $("windowSize").addEventListener("input", e => { $("windowVal").textContent = e.target.value; refreshFilterSettings(); });
 $("filterMode").addEventListener("change", refreshFilterSettings);
-$("timeWindowSelect").addEventListener("change", scheduleRender);
-$("freqSpanSelect")?.addEventListener("change", scheduleRender);
+$("timeWindowSelect").addEventListener("change", () => {
+  timeZoom = null;
+  timeZoomDrag = null;
+  updateTimeZoomControls();
+  scheduleRender();
+});
+$("freqSpanSelect")?.addEventListener("change", () => {
+  frequencyZoom = null;
+  zoomDrag = null;
+  updateZoomControls();
+  scheduleRender();
+});
 window.addEventListener("resize", scheduleRender);
 
+updateZoomControls();
+updateTimeZoomControls();
 refreshFilterSettings();
 scheduleRender();
