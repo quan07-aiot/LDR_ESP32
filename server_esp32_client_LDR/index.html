@@ -78,23 +78,6 @@
       </div>
     </section>
 
-    <section class="record-panel panel">
-      <div class="record-copy">
-        <div class="section-kicker">02 / PHIÊN ĐO</div>
-        <h2>Ghi tín hiệu trong 30 giây</h2>
-        <p>Thu một đoạn ổn định để phổ có độ phân giải cao hơn.</p>
-      </div>
-      <div class="record-actions">
-        <button id="btnRecord30s" class="btn-record">Bắt đầu ghi</button>
-        <button id="btnResetRecord" class="btn-quiet hidden">Quay lại live</button>
-        <button id="btnExportCsv" class="btn-quiet" disabled>Xuất CSV</button>
-      </div>
-      <div class="record-progress">
-        <div class="progress-track"><div id="recordProgressBar" class="progress-fill"></div></div>
-        <div class="progress-caption"><span id="recordTimerLabel">Sẵn sàng ghi · 00:00 / 00:30</span><span id="recordSampleCount">0 mẫu</span></div>
-      </div>
-    </section>
-
     <section class="chart-card panel time-card">
       <div class="chart-heading">
         <div>
@@ -105,11 +88,14 @@
           <label class="compact-select">Cửa sổ
             <select id="timeWindowSelect"><option value="10">10 s</option><option value="30" selected>30 s</option></select>
           </label>
+          <button id="btnTimeZoomMode" class="icon-button" aria-pressed="false" title="Bật rồi kéo chọn khoảng thời gian cần phóng to">Zoom chọn vùng</button>
+          <button id="btnTimeResetZoom" class="icon-button" disabled title="Trở về cửa sổ thời gian đã chọn">Đặt lại zoom</button>
           <button id="btnExportTimePng" class="icon-button" title="Lưu biểu đồ thời gian dạng PNG">Lưu PNG</button>
           <div class="legend"><span class="legend-item"><i class="legend-dot raw-dot"></i>Thô</span><span class="legend-item"><i class="legend-dot filtered-dot"></i>Đã lọc</span></div>
         </div>
       </div>
       <canvas id="timeChart" aria-label="Biểu đồ tín hiệu theo thời gian"></canvas>
+      <p class="zoom-hint" id="timeZoomHint">Bật “Zoom chọn vùng”, kéo trên biểu đồ để phóng to một khoảng thời gian. Biên độ ADC tự căn theo đoạn đang xem.</p>
     </section>
 
     <section class="chart-card panel spectrum-card">
@@ -123,15 +109,18 @@
           <label class="compact-select">Dải tần
             <select id="freqSpanSelect"><option value="100" selected>0–100 Hz</option><option value="50">0–50 Hz</option><option value="25">0–25 Hz</option><option value="10">0–10 Hz</option></select>
           </label>
-          <button id="btnExportPlotPng" class="icon-button" title="Lưu phổ so sánh dạng PNG">Lưu phổ PNG</button>
+          <button id="btnZoomMode" class="icon-button" aria-pressed="false" title="Bật rồi kéo chọn vùng tần số cần phóng to">Zoom chọn vùng</button>
+          <button id="btnResetZoom" class="icon-button" disabled title="Trở về toàn dải tần đã chọn">Đặt lại zoom</button>
+          <button id="btnExportPlotPng" class="icon-button" title="Lưu đồ thị phổ Raw/Filtered dạng PNG">Lưu phổ PNG</button>
         </div>
       </div>
       <div class="spectrum-callout">
         <div class="dominant-readout"><span class="dominant-icon">↗</span><div><span class="mini-label">TẦN SỐ NỔI BẬT SAU LỌC</span><strong id="peakBadge">Chưa có đỉnh</strong></div></div>
         <div class="legend spectrum-legend"><span class="legend-item"><i class="legend-dot raw-dot"></i>Phổ thô</span><span class="legend-item"><i class="legend-dot filtered-dot"></i>Phổ đã lọc</span><span class="legend-item"><i class="legend-dash"></i>Mốc điện lưới 50 Hz</span></div>
       </div>
-      <canvas id="frequencyChart" aria-label="Biểu đồ FFT so sánh phổ thô và phổ đã lọc"></canvas>
-      <div class="spectrum-footnote"><span>Biên độ một phía · đã bỏ DC · cửa sổ Hann</span><span id="resolutionLabel">Δf = — Hz/bin</span></div>
+      <canvas id="frequencyChart" aria-label="Phổ FFT chồng tín hiệu LDR thô và sau lọc"></canvas>
+      <p class="zoom-hint" id="zoomHint">Bật “Zoom chọn vùng”, kéo trên biểu đồ để phóng to dải tần. Biên độ sẽ tự căn theo vùng đang xem; hai tín hiệu dùng chung trục ADC.</p>
+      <div class="spectrum-footnote"><span>Biên độ một phía · bỏ DC và xu hướng chậm · cửa sổ Hann</span><span id="resolutionLabel">Δf = — Hz/bin</span></div>
     </section>
 
     <section class="table-section panel">
@@ -151,16 +140,22 @@
       </div>
     </section>
 
-    <details class="theory-panel panel">
-      <summary><span><span class="section-kicker">GHI CHÚ BÀI GIẢNG</span><strong>Mô hình lọc và phân tích Fourier</strong></span><span class="summary-arrow">⌄</span></summary>
-      <div class="theory-grid">
-        <article><span class="theory-tag">IIR · ĐỆ QUY · CH. 2</span><h3>Thông thấp bậc một</h3><div class="equation">y[n] = αx[n] + (1 − α)y[n−1]</div><p>Hệ thống LTI có hồi tiếp; đầu ra hiện tại phụ thuộc vào đầu vào hiện tại và đầu ra trước. α điều khiển mức làm mượt.</p></article>
-        <article><span class="theory-tag theory-tag-blue">FIR · KHÔNG ĐỆ QUY · CH. 2</span><h3>Trung bình trượt</h3><div class="equation">y[n] = (1/N) Σ x[n−k], k = 0…N−1</div><p>Tổng có trọng số bằng nhau trên N mẫu gần nhất. N tăng thì tín hiệu mượt hơn, nhưng đáp ứng với thay đổi chậm hơn.</p></article>
-        <article class="theory-wide"><span class="theory-tag theory-tag-gold">ĐÁP ỨNG TẦN SỐ · CH. 4</span><h3>Đáp ứng tần số và FFT</h3><div class="equation">Y(eʲω) = X(eʲω)H(eʲω)</div><p>Bộ lọc làm thay đổi biên độ các thành phần tần số. Biểu đồ đặt phổ thô cạnh phổ sau lọc để thấy trực tiếp thành phần nào bị suy giảm; Δf = Fs/N cho biết khoảng cách giữa hai bin FFT.</p></article>
+    <section class="record-panel panel">
+      <div class="record-copy">
+        <div class="section-kicker">02 / PHIÊN ĐO</div>
+        <h2>Ghi tín hiệu trong 30 giây</h2>
+        <p>Thu một đoạn ổn định để phổ có độ phân giải cao hơn.</p>
       </div>
-    </details>
-
-    <footer class="footer-note"><span class="footer-mark">LDR / FFT</span><span>Đóng Serial Monitor trước khi kết nối · Hỗ trợ Chrome và Edge trên máy tính</span></footer>
+      <div class="record-actions">
+        <button id="btnRecord30s" class="btn-record">Bắt đầu ghi</button>
+        <button id="btnResetRecord" class="btn-quiet hidden">Quay lại live</button>
+        <button id="btnExportCsv" class="btn-quiet" disabled>Xuất CSV</button>
+      </div>
+      <div class="record-progress">
+        <div class="progress-track"><div id="recordProgressBar" class="progress-fill"></div></div>
+        <div class="progress-caption"><span id="recordTimerLabel">Sẵn sàng ghi · 00:00 / 00:30</span><span id="recordSampleCount">0 mẫu</span></div>
+      </div>
+    </section>
   </main>
 </body>
 </html>
