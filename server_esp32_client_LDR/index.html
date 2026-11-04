@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111d">
+  <title>LDR Spectrum Lab · ESP32-S3</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-dot"></span> PTIT · TÍN HIỆU & HỆ THỐNG</div>
+        <h1>LDR <span>Spectrum Lab</span></h1>
+        <p>Quan sát ánh sáng theo thời gian. Đọc thành phần tần số bằng FFT. So sánh tín hiệu trước và sau lọc.</p>
+      </div>
+      <div class="hero-mark" aria-hidden="true">
+        <span class="hero-mark-ring ring-one"></span>
+        <span class="hero-mark-ring ring-two"></span>
+        <span class="hero-mark-core">ƒ</span>
+        <span class="hero-mark-wave wave-one"></span>
+        <span class="hero-mark-wave wave-two"></span>
+      </div>
+    </header>
+
+    <section class="topbar">
+      <div class="connection-block">
+        <button id="connect" class="btn-primary">Kết nối ESP32</button>
+        <span id="status" class="status-pill">Chưa kết nối</span>
+      </div>
+      <div class="readouts" aria-label="Thông số tín hiệu trực tiếp">
+        <div class="readout"><span class="readout-label">Tần số lấy mẫu</span><strong id="sampleRate">— <small>Hz</small></strong></div>
+        <div class="readout"><span class="readout-label">Số mẫu FFT</span><strong id="sampleCount">—</strong></div>
+        <div class="readout readout-raw"><span class="readout-label">ADC thô</span><strong id="latestRaw">—</strong></div>
+        <div class="readout readout-filtered"><span class="readout-label">ADC đã lọc</span><strong id="latestFiltered">—</strong></div>
+        <div class="readout readout-peak"><span class="readout-label">Đỉnh chính</span><strong id="peakFreq">— <small>Hz</small></strong></div>
+      </div>
+    </section>
+
+    <section class="filter-panel panel">
+      <div class="section-heading">
+        <div>
+          <div class="section-kicker">01 / XỬ LÝ TÍN HIỆU</div>
+          <h2>Chọn một bộ lọc</h2>
+        </div>
+        <p>Hai mô hình LTI rời rạc cơ bản, dễ đối chiếu với bài giảng.</p>
+      </div>
+
+      <div class="filter-layout">
+        <div class="filter-controls">
+          <label class="field-label" for="filterMode">Phương pháp lọc</label>
+          <select id="filterMode" class="select-control">
+            <option value="rc_iir" selected>Thông thấp bậc 1 · IIR đệ quy</option>
+            <option value="moving_avg">Trung bình trượt · FIR không đệ quy</option>
+          </select>
+
+          <div class="tuning-control" id="alphaControl">
+            <div class="range-heading"><label class="field-label" for="filterAlpha">Hệ số α</label><strong id="alphaVal">0.20</strong></div>
+            <input type="range" id="filterAlpha" min="0.05" max="0.95" step="0.05" value="0.20">
+            <div class="range-caption"><span>Mượt hơn</span><span>Đáp ứng nhanh</span></div>
+          </div>
+
+          <div class="tuning-control hidden" id="windowControl">
+            <div class="range-heading"><label class="field-label" for="windowSize">Số mẫu N</label><strong id="windowVal">5</strong></div>
+            <input type="range" id="windowSize" min="3" max="21" step="2" value="5">
+            <div class="range-caption"><span>Lọc nhẹ</span><span>Mượt hơn</span></div>
+          </div>
+        </div>
+
+        <div class="filter-explainer">
+          <div class="filter-explainer-top"><span class="mini-label">MÔ HÌNH ĐANG DÙNG</span><span class="lti-chip">DT · LTI</span></div>
+          <h3 id="filterTitle">Thông thấp bậc 1 · IIR</h3>
+          <div class="equation" id="filterEquation">y[n] = αx[n] + (1 − α)y[n−1]</div>
+          <p id="filterDescription">Đầu ra dùng mẫu hiện tại và đầu ra trước đó. α nhỏ làm suy giảm mạnh hơn các thành phần tần số cao.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="record-panel panel">
+      <div class="record-copy">
+        <div class="section-kicker">02 / PHIÊN ĐO</div>
+        <h2>Ghi tín hiệu trong 30 giây</h2>
+        <p>Thu một đoạn ổn định để phổ có độ phân giải cao hơn.</p>
+      </div>
+      <div class="record-actions">
+        <button id="btnRecord30s" class="btn-record">Bắt đầu ghi</button>
+        <button id="btnResetRecord" class="btn-quiet hidden">Quay lại live</button>
+        <button id="btnExportCsv" class="btn-quiet" disabled>Xuất CSV</button>
+      </div>
+      <div class="record-progress">
+        <div class="progress-track"><div id="recordProgressBar" class="progress-fill"></div></div>
+        <div class="progress-caption"><span id="recordTimerLabel">Sẵn sàng ghi · 00:00 / 00:30</span><span id="recordSampleCount">0 mẫu</span></div>
+      </div>
+    </section>
+
+    <section class="chart-card panel time-card">
+      <div class="chart-heading">
+        <div>
+          <div class="section-kicker">MIỀN THỜI GIAN</div>
+          <h2>Tín hiệu cảm biến</h2>
+        </div>
+        <div class="chart-tools">
+          <label class="compact-select">Cửa sổ
+            <select id="timeWindowSelect"><option value="10">10 s</option><option value="30" selected>30 s</option></select>
+          </label>
+          <button id="btnExportTimePng" class="icon-button" title="Lưu biểu đồ thời gian dạng PNG">Lưu PNG</button>
+          <div class="legend"><span class="legend-item"><i class="legend-dot raw-dot"></i>Thô</span><span class="legend-item"><i class="legend-dot filtered-dot"></i>Đã lọc</span></div>
+        </div>
+      </div>
+      <canvas id="timeChart" aria-label="Biểu đồ tín hiệu theo thời gian"></canvas>
+    </section>
+
+    <section class="chart-card panel spectrum-card">
+      <div class="chart-heading spectrum-heading">
+        <div>
+          <div class="section-kicker">MIỀN TẦN SỐ · FFT</div>
+          <h2>Phổ biên độ</h2>
+          <p class="chart-subtitle" id="spectrumMeta">Chờ dữ liệu · Hai đường phổ dùng cùng một cửa sổ mẫu</p>
+        </div>
+        <div class="spectrum-tools">
+          <label class="compact-select">Dải tần
+            <select id="freqSpanSelect"><option value="100" selected>0–100 Hz</option><option value="50">0–50 Hz</option><option value="25">0–25 Hz</option><option value="10">0–10 Hz</option></select>
+          </label>
+          <button id="btnExportPlotPng" class="icon-button" title="Lưu phổ so sánh dạng PNG">Lưu phổ PNG</button>
+        </div>
+      </div>
+      <div class="spectrum-callout">
+        <div class="dominant-readout"><span class="dominant-icon">↗</span><div><span class="mini-label">TẦN SỐ NỔI BẬT SAU LỌC</span><strong id="peakBadge">Chưa có đỉnh</strong></div></div>
+        <div class="legend spectrum-legend"><span class="legend-item"><i class="legend-dot raw-dot"></i>Phổ thô</span><span class="legend-item"><i class="legend-dot filtered-dot"></i>Phổ đã lọc</span><span class="legend-item"><i class="legend-dash"></i>Mốc điện lưới 50 Hz</span></div>
+      </div>
+      <canvas id="frequencyChart" aria-label="Biểu đồ FFT so sánh phổ thô và phổ đã lọc"></canvas>
+      <div class="spectrum-footnote"><span>Biên độ một phía · đã bỏ DC · cửa sổ Hann</span><span id="resolutionLabel">Δf = — Hz/bin</span></div>
+    </section>
+
+    <section class="table-section panel">
+      <div class="chart-heading">
+        <div>
+          <div class="section-kicker">03 / ĐỌC KẾT QUẢ</div>
+          <h2>Các đỉnh phổ sau lọc</h2>
+          <p class="chart-subtitle" id="spectrumTableMeta">Kết nối ESP32 để bắt đầu phân tích trực tiếp.</p>
+        </div>
+        <span class="mode-pill" id="tableModeBadge">LIVE</span>
+      </div>
+      <div class="table-wrap">
+        <table class="spectrum-table" id="spectrumTable">
+          <thead><tr><th>#</th><th>Tần số</th><th>Chu kỳ</th><th>Biên độ</th><th>Mức dB</th><th>Năng lượng</th><th>Nhận xét</th></tr></thead>
+          <tbody id="spectrumTableBody"><tr><td colspan="7" class="empty-table">Chưa có dữ liệu phổ. Kết nối ESP32 để xem các đỉnh tần số.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <details class="theory-panel panel">
+      <summary><span><span class="section-kicker">GHI CHÚ BÀI GIẢNG</span><strong>Mô hình lọc và phân tích Fourier</strong></span><span class="summary-arrow">⌄</span></summary>
+      <div class="theory-grid">
+        <article><span class="theory-tag">IIR · ĐỆ QUY · CH. 2</span><h3>Thông thấp bậc một</h3><div class="equation">y[n] = αx[n] + (1 − α)y[n−1]</div><p>Hệ thống LTI có hồi tiếp; đầu ra hiện tại phụ thuộc vào đầu vào hiện tại và đầu ra trước. α điều khiển mức làm mượt.</p></article>
+        <article><span class="theory-tag theory-tag-blue">FIR · KHÔNG ĐỆ QUY · CH. 2</span><h3>Trung bình trượt</h3><div class="equation">y[n] = (1/N) Σ x[n−k], k = 0…N−1</div><p>Tổng có trọng số bằng nhau trên N mẫu gần nhất. N tăng thì tín hiệu mượt hơn, nhưng đáp ứng với thay đổi chậm hơn.</p></article>
+        <article class="theory-wide"><span class="theory-tag theory-tag-gold">ĐÁP ỨNG TẦN SỐ · CH. 4</span><h3>Đáp ứng tần số và FFT</h3><div class="equation">Y(eʲω) = X(eʲω)H(eʲω)</div><p>Bộ lọc làm thay đổi biên độ các thành phần tần số. Biểu đồ đặt phổ thô cạnh phổ sau lọc để thấy trực tiếp thành phần nào bị suy giảm; Δf = Fs/N cho biết khoảng cách giữa hai bin FFT.</p></article>
+      </div>
+    </details>
+
+    <footer class="footer-note"><span class="footer-mark">LDR / FFT</span><span>Đóng Serial Monitor trước khi kết nối · Hỗ trợ Chrome và Edge trên máy tính</span></footer>
+  </main>
+</body>
+</html>

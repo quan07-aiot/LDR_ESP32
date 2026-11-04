@@ -1,0 +1,16 @@
+{
+  "name": "esp32-ldr-serial-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local LDR dashboard with serial input and browser FFT",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "serialport": "^13.0.0"
+  }
+}
